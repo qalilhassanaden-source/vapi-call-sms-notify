@@ -7,7 +7,6 @@ app.use(express.json({ limit: "2mb" }));
 const {
   TWILIO_ACCOUNT_SID,
   TWILIO_AUTH_TOKEN,
-  TWILIO_FROM_NUMBER,
   NOTIFY_TO_NUMBER
 } = process.env;
 
@@ -33,8 +32,8 @@ app.post("/vapi", async (req, res) => {
         `CallId: ${callId}`;
 
       await client.messages.create({
-        from: TWILIO_FROM_NUMBER,
-        to: NOTIFY_TO_NUMBER,
+        from: "whatsapp:+14155238886",
+        to: "whatsapp:" + NOTIFY_TO_NUMBER,
         body: text
       });
     }
