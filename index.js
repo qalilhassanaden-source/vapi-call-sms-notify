@@ -17,7 +17,27 @@ app.post("/vapi", async (req, res) => {
   try {
     const msg = req.body?.message || {};
 
-    if (msg.type === "status-update") {
+    if (msg.type === "status-update" || msg.type === "end-of-call-report") {
+  const call = msg.call || {};
+  const status = msg.status || call.status || msg.type;
+  const caller = call?.customer?.number || "unknown";
+  const toNumber = call?.phoneNumber?.number || "unknown";
+  const callId = call?.id || "unknown";
+
+  const text =
+    `Vapi call event:\n` +
+    `Type: ${msg.type}\n` +
+    `Status: ${status}\n` +
+    `From: ${caller}\n` +
+    `To: ${toNumber}\n` +
+    `CallId: ${callId}`;
+
+  await client.messages.create({
+    from: TWILIO_FROM_NUMBER,
+    to: NOTIFY_TO_NUMBER,
+    body: text
+  });
+}
       const call = msg.call || {};
       const status = msg.status || call.status;
       const caller = call?.customer?.number || "unknown";
