@@ -241,10 +241,10 @@ app.get("/", (_, res) => res.send("ok"));
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Listening on ${port}`));
 
-const express = require("express");
+
 const twilio = require("twilio");
 
-const app = express();
+
 app.use(express.json({ limit: "2mb" }));
 
 const {
