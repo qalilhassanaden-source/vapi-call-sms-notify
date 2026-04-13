@@ -1,4 +1,3 @@
-
 const express = require("express");
 const { createClient } = require("@supabase/supabase-js");
 
@@ -356,4 +355,3 @@ app.get("/", (_, res) => res.send("ok"));
 
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Listening on ${port}`));
->>>>>>> 2b89020dad3cf6202056806b4279b6652a6d0c03
