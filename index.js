@@ -236,10 +236,6 @@ app.post("/vapi", async (req, res) => {
   }
 });
 
-app.get("/", (_, res) => res.send("ok"));
-
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Listening on ${port}`));
 
 
 const twilio = require("twilio");
