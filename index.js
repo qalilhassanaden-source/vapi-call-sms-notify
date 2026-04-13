@@ -12,6 +12,29 @@ const {
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
+async function getAvailableMenu() {
+  const { data, error } = await supabase
+    .from("menu")
+    .select("name, price, category, available")
+    .eq("available", true)
+    .order("category", { ascending: true })
+    .order("name", { ascending: true });
+
+  if (error) throw error;
+  return data || [];
+}
+
+async function getSingleMenuItem(itemName) {
+  const { data, error } = await supabase
+    .from("menu")
+    .select("name, price, category, available, description")
+    .ilike("name", itemName)
+    .limit(1);
+
+  if (error) throw error;
+  return (data && data[0]) || null;
+}
+
 function makeOrderNumber() {
   return `ORD-${Date.now()}`;
 }
@@ -48,6 +71,57 @@ app.post("/vapi", async (req, res) => {
       for (const toolCall of toolCalls) {
         const name = toolCall.name;
         const p = toolCall.parameters || {};
+        if (name === "get_menu") {
+          const menuItems = await getAvailableMenu();
+
+          if (menuItems.length === 0) {
+            results.push({
+              toolCallId: toolCall.id,
+              result: "No menu items are currently available."
+            });
+            continue;
+          }
+
+          const menuText = menuItems
+            .map((item) => `${item.name} - ${item.price}`)
+            .join("\n");
+
+          results.push({
+            toolCallId: toolCall.id,
+            result: `Available menu items:\n${menuText}`
+          });
+          continue;
+        }
+
+        if (name === "get_menu_item") {
+          const itemName = String(p.item_name || "").trim();
+
+          if (!itemName) {
+            results.push({
+              toolCallId: toolCall.id,
+              result: "No item name was provided."
+            });
+            continue;
+          }
+
+          const item = await getSingleMenuItem(itemName);
+
+          if (!item || !item.available) {
+            results.push({
+              toolCallId: toolCall.id,
+              result: `${itemName} is not available on the menu.`
+            });
+            continue;
+          }
+
+          results.push({
+            toolCallId: toolCall.id,
+            result:
+              `${item.name} costs ${item.price}. ` +
+              `${item.description ? "Description: " + item.description : ""}`
+          });
+          continue;
+        }
 
         if (name === "create_order") {
           const requestedItems = Array.isArray(p.items) ? p.items : [];
