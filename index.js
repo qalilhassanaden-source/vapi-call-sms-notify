@@ -1,0 +1,168 @@
+const express = require("express");
+const { createClient } = require("@supabase/supabase-js");
+
+const app = express();
+app.use(express.json({ limit: "5mb" }));
+
+const {
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
+  HUMAN_TRANSFER_NUMBER
+} = process.env;
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+function makeOrderNumber() {
+  return `ORD-${Date.now()}`;
+}
+
+function formatItems(items) {
+  if (!Array.isArray(items) || items.length === 0) return "No items";
+  return items.map((item) => `- ${item.quantity} x ${item.name}`).join("\n");
+}
+
+async function getMenuItemsByNames(names) {
+  if (!Array.isArray(names) || names.length === 0) return [];
+
+  const { data, error } = await supabase
+    .from("menu")
+    .select("id, name, price, category, available")
+    .in("name", names);
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
+app.post("/vapi", async (req, res) => {
+  try {
+    const msg = req.body?.message || {};
+    const call = msg.call || {};
+
+    if (msg.type === "tool-calls") {
+      const toolCalls = msg.toolCallList || [];
+      const results = [];
+
+      for (const toolCall of toolCalls) {
+        const name = toolCall.name;
+        const p = toolCall.parameters || {};
+
+        if (name === "create_order") {
+          const requestedItems = Array.isArray(p.items) ? p.items : [];
+
+          if (requestedItems.length === 0) {
+            results.push({
+              toolCallId: toolCall.id,
+              result: "No items were provided in the order."
+            });
+            continue;
+          }
+
+          const requestedNames = requestedItems.map((item) => item.name).filter(Boolean);
+          const menuItems = await getMenuItemsByNames(requestedNames);
+
+          const menuMap = new Map(
+            menuItems.map((item) => [item.name.toLowerCase(), item])
+          );
+
+          const validatedItems = [];
+          const invalidItems = [];
+
+          for (const item of requestedItems) {
+            const lookup = menuMap.get(String(item.name || "").toLowerCase());
+
+            if (!lookup || !lookup.available) {
+              invalidItems.push(item.name || "Unknown item");
+              continue;
+            }
+
+            const quantity = Number(item.quantity || 0);
+
+            validatedItems.push({
+              name: lookup.name,
+              quantity,
+              unit_price: Number(lookup.price || 0),
+              category: lookup.category
+            });
+          }
+
+          if (invalidItems.length > 0) {
+            results.push({
+              toolCallId: toolCall.id,
+              result: `These items are not available: ${invalidItems.join(", ")}`
+            });
+            continue;
+          }
+
+          const subtotal = validatedItems.reduce((sum, item) => {
+            return sum + item.quantity * item.unit_price;
+          }, 0);
+
+          const deliveryFee = Number(p.delivery_fee || 0);
+          const total = subtotal + deliveryFee;
+          const orderNumber = makeOrderNumber();
+
+          const { error } = await supabase.from("orders").insert([
+            {
+              order_number: orderNumber,
+              caller_number: p.caller_number || call?.customer?.number || "",
+              customer_name: p.customer_name || "",
+              customer_phone: p.customer_phone || "",
+              items_json: validatedItems,
+              order_type: p.order_type || "pickup",
+              address: p.address || "",
+              notes: p.notes || "",
+              subtotal,
+              delivery_fee: deliveryFee,
+              total,
+              status: "new"
+            }
+          ]);
+
+          if (error) {
+            console.error("Order insert error:", error);
+            results.push({
+              toolCallId: toolCall.id,
+              result: "Failed to save order. Please try again."
+            });
+            continue;
+          }
+
+          results.push({
+            toolCallId: toolCall.id,
+            result:
+              `Order saved successfully. ` +
+              `Order number: ${orderNumber}. ` +
+              `Items:\n${formatItems(validatedItems)}\n` +
+              `Total: ${total}`
+          });
+        }
+
+        if (name === "transfer_call") {
+          const transferTo = p.transfer_to || HUMAN_TRANSFER_NUMBER || "";
+
+          results.push({
+            toolCallId: toolCall.id,
+            result: transferTo
+              ? `Transfer approved. Connect the caller to ${transferTo}.`
+              : "No human transfer number is configured."
+          });
+        }
+      }
+
+      return res.status(200).json({ results });
+    }
+
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error("Webhook error:", err);
+    return res.status(200).json({ ok: true });
+  }
+});
+
+app.get("/", (_, res) => res.send("ok"));
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`Listening on ${port}`));
