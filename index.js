@@ -126,7 +126,7 @@ app.post("/vapi", async (req, res) => {
         if (name === "create_order") {
           const requestedItems = Array.isArray(p.items) ? p.items : [];
 
-          if (requestedItems.length === 0) {
+          if (requestedItems.length === 0) {s
             results.push({
               toolCallId: toolCall.id,
               result: "No items were provided in the order."
