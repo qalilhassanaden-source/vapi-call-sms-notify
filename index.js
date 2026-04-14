@@ -380,6 +380,51 @@ app.post("/vapi", async (req, res) => {
   }
 });
 
+app.post("/vapi", async (req, res) => {
+  try {
+    const toolCalls = req.body?.message?.toolCalls;
+
+    if (!toolCalls) {
+      return res.json({});
+    }
+
+    const results = [];
+
+    for (const toolCall of toolCalls) {
+      const name = toolCall.function.name;
+
+      if (name === "get_menu") {
+        const { data } = await supabase
+          .from("menu")
+          .select("*")
+          .eq("available", true);
+
+        results.push({
+          toolCallId: toolCall.id,
+          result: { menu: data }
+        });
+      }
+
+      if (name === "create_order") {
+        await supabase.from("orders").insert([{
+          order_number: "ORD-" + Date.now()
+        }]);
+
+        results.push({
+          toolCallId: toolCall.id,
+          result: { success: true }
+        });
+      }
+    }
+
+    return res.json({ results });
+
+  } catch (err) {
+    console.error(err);
+    return res.json({ results: [] });
+  }
+});
+
 app.get("/", (_, res) => res.send("ok"));
 
 const port = process.env.PORT || 3000;
