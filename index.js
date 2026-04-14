@@ -347,6 +347,19 @@ app.post("/vapi", async (req, res) => {
   }
 });
 
+app.get("/test-menu", async (_, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("menu")
+      .select("*")
+      .eq("available", true);
+
+    return res.status(200).json({ data, error });
+  } catch (err) {
+    return res.status(500).json({ error: String(err) });
+  }
+});
+
 app.get("/", (_, res) => res.send("ok"));
 
 const port = process.env.PORT || 3000;
