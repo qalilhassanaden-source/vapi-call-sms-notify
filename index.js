@@ -118,265 +118,174 @@ async function sendWhatsAppNotification(body) {
 
 app.post("/vapi", async (req, res) => {
   try {
-    const msg = req.body?.message || {};
-    const call = msg?.call || {};
+    console.log("VAPI BODY:", JSON.stringify(req.body, null, 2));
 
-    if (msg.type === "end-of-call-report") {
-      const callerNumber =
-        call?.customer?.number ||
-        call?.phoneNumber ||
-        msg?.customer?.number ||
-        "";
+    const message = req.body?.message || {};
+    const toolCalls = message.toolCallList || message.toolCalls || [];
 
-      const customerName =
-        call?.customer?.name ||
-        msg?.customer?.name ||
-        "";
-
-      const summary = getSummaryText(msg, call);
-      const transcript = getTranscriptText(msg, call);
-
-      const { error } = await supabase.from("calls").insert([
-        {
-          caller_number: callerNumber,
-          customer_name: customerName,
-          summary,
-          transcript,
-          status: "completed"
-        }
-      ]);
-
-      if (error) {
-        console.error("Calls insert error:", error);
-      }
-
+    if (!Array.isArray(toolCalls) || toolCalls.length === 0) {
       return res.status(200).json({ ok: true });
     }
 
-    if (msg.type === "tool-calls") {
-      const toolCalls = msg.toolCallList || [];
-      const results = [];
+    const results = [];
 
-      for (const toolCall of toolCalls) {
-        const name = toolCall.name;
-        const p = toolCall.parameters || {};
+    for (const toolCall of toolCalls) {
+      const toolCallId = toolCall.id;
+      const name = toolCall.name || toolCall.function?.name || "";
 
-        if (name === "get_menu") {
-          try {
-            const menuItems = await getAvailableMenu();
+      let params = toolCall.parameters || {};
+      if (
+        (!params || Object.keys(params).length === 0) &&
+        toolCall.function?.arguments
+      ) {
+        try {
+          params = JSON.parse(toolCall.function.arguments);
+        } catch {
+          params = {};
+        }
+      }
 
-            if (menuItems.length === 0) {
-              results.push({
-                toolCallId: toolCall.id,
-                result: "No menu items are currently available."
-              });
-              continue;
-            }
+      console.log("TOOL:", name, params);
 
-            const menuText = menuItems
-              .map((item) => `${item.name} - ${item.price}`)
-              .join(", ");
+      if (name === "get_menu") {
+        const { data, error } = await supabase
+          .from("menu")
+          .select("name, price, category, available, description")
+          .eq("available", true)
+          .order("category", { ascending: true })
+          .order("name", { ascending: true });
 
-            results.push({
-              toolCallId: toolCall.id,
-              result: `Available menu items: ${menuText}`
-            });
-          } catch (error) {
-            console.error("get_menu error:", error);
-            results.push({
-              toolCallId: toolCall.id,
-              result: "Menu is temporarily unavailable right now."
-            });
-          }
+        if (error) {
+          console.error("get_menu error:", error);
+          results.push({
+            toolCallId,
+            result: "Menu is temporarily unavailable."
+          });
           continue;
         }
 
-        if (name === "get_menu_item") {
-          try {
-            const itemName = String(p.item_name || "").trim();
-
-            if (!itemName) {
-              results.push({
-                toolCallId: toolCall.id,
-                result: "No item name was provided."
-              });
-              continue;
-            }
-
-            const item = await getSingleMenuItem(itemName);
-
-            if (!item || !item.available) {
-              results.push({
-                toolCallId: toolCall.id,
-                result: `${itemName} is not available on the menu.`
-              });
-              continue;
-            }
-
-            const descriptionText = item.description
-              ? ` Description: ${item.description}`
-              : "";
-
-            results.push({
-              toolCallId: toolCall.id,
-              result: `${item.name} costs ${item.price}.${descriptionText}`
-            });
-          } catch (error) {
-            console.error("get_menu_item error:", error);
-            results.push({
-              toolCallId: toolCall.id,
-              result: "That menu item is temporarily unavailable right now."
-            });
-          }
+        if (!data || data.length === 0) {
+          results.push({
+            toolCallId,
+            result: "No menu items are currently available."
+          });
           continue;
         }
 
-        if (name === "create_order") {
-          try {
-            const requestedItems = Array.isArray(p.items) ? p.items : [];
+        const menuText = data
+          .map((item) => `${item.name} - ${item.price}`)
+          .join(", ");
 
-            if (requestedItems.length === 0) {
-              results.push({
-                toolCallId: toolCall.id,
-                result: "No items were provided in the order."
-              });
-              continue;
-            }
+        results.push({
+          toolCallId,
+          result: `Available menu items: ${menuText}`
+        });
+        continue;
+      }
 
-            const requestedNames = requestedItems
-              .map((item) => item.name)
-              .filter(Boolean);
+      if (name === "get_menu_item") {
+        const itemName = String(params.item_name || "").trim();
 
-            const menuItems = await getMenuItemsByNames(requestedNames);
+        if (!itemName) {
+          results.push({
+            toolCallId,
+            result: "No item name was provided."
+          });
+          continue;
+        }
 
-            const menuMap = new Map(
-              menuItems.map((item) => [normalizeName(item.name), item])
-            );
+        const { data, error } = await supabase
+          .from("menu")
+          .select("name, price, category, available, description")
+          .ilike("name", itemName)
+          .limit(1);
 
-            const validatedItems = [];
-            const invalidItems = [];
+        if (error) {
+          console.error("get_menu_item error:", error);
+          results.push({
+            toolCallId,
+            result: "That item is temporarily unavailable."
+          });
+          continue;
+        }
 
-            for (const item of requestedItems) {
-              const found = menuMap.get(normalizeName(item.name));
+        const item = data?.[0];
 
-              if (!found || !found.available) {
-                invalidItems.push(item.name || "Unknown item");
-                continue;
-              }
+        if (!item || !item.available) {
+          results.push({
+            toolCallId,
+            result: `${itemName} is not available on the menu.`
+          });
+          continue;
+        }
 
-              const quantity = Number(item.quantity || 0);
+        const descriptionText = item.description
+          ? ` Description: ${item.description}`
+          : "";
 
-              if (!Number.isFinite(quantity) || quantity <= 0) {
-                invalidItems.push(item.name || "Unknown item");
-                continue;
-              }
+        results.push({
+          toolCallId,
+          result: `${item.name} costs ${item.price}.${descriptionText}`
+        });
+        continue;
+      }
 
-              validatedItems.push({
-                name: found.name,
-                quantity,
-                unit_price: Number(found.price || 0),
-                category: found.category
-              });
-            }
+      if (name === "create_order") {
+        const requestedItems = Array.isArray(params.items) ? params.items : [];
 
-            if (invalidItems.length > 0) {
-              results.push({
-                toolCallId: toolCall.id,
-                result: `These items are not available or invalid: ${invalidItems.join(", ")}`
-              });
-              continue;
-            }
+        if (requestedItems.length === 0) {
+          results.push({
+            toolCallId,
+            result: "No items were provided in the order."
+          });
+          continue;
+        }
 
-            const subtotal = validatedItems.reduce((sum, item) => {
-              return sum + item.quantity * item.unit_price;
-            }, 0);
+        const orderNumber = `ORD-${Date.now()}`;
 
-            const deliveryFee = Number(p.delivery_fee || 0);
-            const total = subtotal + deliveryFee;
-            const orderNumber = makeOrderNumber();
-
-            const callerNumber =
-              p.caller_number ||
-              call?.customer?.number ||
-              "";
-
-            const customerName = String(p.customer_name || "").trim();
-            const customerPhone = String(p.customer_phone || "").trim();
-            const orderType = String(p.order_type || "pickup").trim();
-            const address = String(p.address || "").trim();
-            const notes = String(p.notes || "").trim();
-
-            const { error } = await supabase.from("orders").insert([
-              {
-                order_number: orderNumber,
-                caller_number: callerNumber,
-                customer_name: customerName,
-                customer_phone: customerPhone,
-                items_json: validatedItems,
-                order_type: orderType,
-                address,
-                notes,
-                subtotal,
-                delivery_fee: deliveryFee,
-                total,
-                status: "new"
-              }
-            ]);
-
-            if (error) {
-              console.error("Order insert error:", error);
-              results.push({
-                toolCallId: toolCall.id,
-                result: "Failed to save order. Please try again."
-              });
-              continue;
-            }
-
-            const notification =
-              `🍔 NEW ORDER ${orderNumber}\n\n` +
-              `Customer: ${customerName || "Unknown"}\n` +
-              `Phone: ${customerPhone || callerNumber || "Unknown"}\n` +
-              `Type: ${orderType}\n` +
-              `Items: ${formatItemsSingleLine(validatedItems)}\n` +
-              `Address: ${address || "-"}\n` +
-              `Notes: ${notes || "-"}\n` +
-              `Subtotal: ${subtotal}\n` +
-              `Delivery Fee: ${deliveryFee}\n` +
-              `Total: ${total}`;
-
-            try {
-              await sendWhatsAppNotification(notification);
-            } catch (notifyError) {
-              console.error("WhatsApp notification error:", notifyError);
-            }
-
-            results.push({
-              toolCallId: toolCall.id,
-              result: `Order saved successfully. Order number: ${orderNumber}. Items: ${formatItemsSingleLine(validatedItems)}. Total: ${total}`
-            });
-          } catch (error) {
-            console.error("create_order error:", error);
-            results.push({
-              toolCallId: toolCall.id,
-              result: "There was a problem saving the order."
-            });
+        const { error } = await supabase.from("orders").insert([
+          {
+            order_number: orderNumber,
+            caller_number: String(params.caller_number || ""),
+            customer_name: String(params.customer_name || ""),
+            customer_phone: String(params.customer_phone || ""),
+            items_json: requestedItems,
+            order_type: String(params.order_type || "pickup"),
+            address: String(params.address || ""),
+            notes: String(params.notes || ""),
+            subtotal: Number(params.subtotal || 0),
+            delivery_fee: Number(params.delivery_fee || 0),
+            total: Number(params.total || 0),
+            status: "new"
           }
+        ]);
+
+        if (error) {
+          console.error("create_order error:", error);
+          results.push({
+            toolCallId,
+            result: "Failed to save order."
+          });
           continue;
         }
 
         results.push({
-          toolCallId: toolCall.id,
-          result: `Unknown tool: ${name}`
+          toolCallId,
+          result: `Order saved successfully. Order number: ${orderNumber}.`
         });
+        continue;
       }
 
-      return res.status(200).json({ results });
+      results.push({
+        toolCallId,
+        result: `Unknown tool: ${name}`
+      });
     }
 
-    return res.status(200).json({ ok: true });
+    return res.status(200).json({ results });
   } catch (err) {
-    console.error("Webhook error:", err);
-    return res.status(200).json({ ok: true });
+    console.error("VAPI ROUTE ERROR:", err);
+    return res.status(200).json({ results: [] });
   }
 });
 
@@ -422,6 +331,19 @@ app.post("/vapi", async (req, res) => {
   } catch (err) {
     console.error(err);
     return res.json({ results: [] });
+  }
+});
+
+app.get("/test-menu", async (_, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("menu")
+      .select("*")
+      .eq("available", true);
+
+    return res.status(200).json({ data, error });
+  } catch (err) {
+    return res.status(500).json({ error: String(err) });
   }
 });
 
