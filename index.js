@@ -145,6 +145,12 @@ function formatMoney(value) {
   return Number.isFinite(number) ? number.toFixed(2) : "0.00";
 }
 
+function truncateText(value, maxLength) {
+  const text = String(value || "").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 3)}...`;
+}
+
 function extractCallerNumber(body) {
   return normalizePhone(
     body?.message?.call?.customer?.number ||
@@ -610,6 +616,14 @@ app.post("/vapi", async (req, res) => {
           ).trim();
           const address = String(params.address || "").trim();
           const notes = String(params.notes || params.note || "").trim();
+          const conversationSummary = truncateText(
+            params.summary ||
+              params.conversation_summary ||
+              params.conversationSummary ||
+              extractSummary(req.body) ||
+              extractTranscript(req.body),
+            1200
+          );
 
           ensureSupabase();
 
@@ -648,6 +662,7 @@ app.post("/vapi", async (req, res) => {
             `Items: ${formatItemsSingleLine(validatedItems)}\n` +
             `Address: ${address || "-"}\n` +
             `Notes: ${notes || "-"}\n` +
+            `Conversation: ${conversationSummary || "-"}\n` +
             `Subtotal: ${formatMoney(subtotal)}\n` +
             `Delivery Fee: ${formatMoney(safeDeliveryFee)}\n` +
             `Total: ${formatMoney(total)}`;
