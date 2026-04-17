@@ -258,28 +258,44 @@ async function getMenuItemsByNames(names) {
 
 function getNotificationAddress() {
   if (NOTIFY_CHANNEL === "whatsapp") {
-    return NOTIFY_TO_NUMBER.startsWith("whatsapp:")
-      ? NOTIFY_TO_NUMBER
-      : `whatsapp:${NOTIFY_TO_NUMBER}`;
+    return toWhatsAppAddress(NOTIFY_TO_NUMBER);
   }
 
   return NOTIFY_TO_NUMBER;
 }
 
+function toWhatsAppAddress(value) {
+  const address = String(value || "").trim();
+  if (address.toLowerCase().startsWith("whatsapp:")) return address;
+  return `whatsapp:${normalizePhone(address)}`;
+}
+
 async function sendOrderNotification(body) {
   if (!twilioClient) {
     console.warn("Twilio notification skipped: missing Twilio configuration.");
-    return;
+    return { sent: false, reason: "missing Twilio configuration" };
   }
 
   const from =
-    NOTIFY_CHANNEL === "whatsapp" ? TWILIO_WHATSAPP_FROM : TWILIO_FROM_NUMBER;
+    NOTIFY_CHANNEL === "whatsapp"
+      ? toWhatsAppAddress(TWILIO_WHATSAPP_FROM)
+      : TWILIO_FROM_NUMBER;
+  const to = getNotificationAddress();
 
-  await twilioClient.messages.create({
+  const message = await twilioClient.messages.create({
     from,
-    to: getNotificationAddress(),
+    to,
     body
   });
+
+  console.log("Notification sent:", {
+    channel: NOTIFY_CHANNEL,
+    sid: message.sid,
+    status: message.status,
+    to
+  });
+
+  return { sent: true, sid: message.sid, status: message.status };
 }
 
 async function executeLiveTransfer(body, department) {
@@ -625,15 +641,23 @@ app.post("/vapi", async (req, res) => {
             `Delivery Fee: ${formatMoney(safeDeliveryFee)}\n` +
             `Total: ${formatMoney(total)}`;
 
+          let notificationResult = { sent: false, reason: "not attempted" };
+
           try {
-            await sendOrderNotification(notification);
+            notificationResult = await sendOrderNotification(notification);
           } catch (notifyError) {
-            console.error("notification error:", notifyError);
+            notificationResult = {
+              sent: false,
+              reason: notifyError.message || String(notifyError),
+              code: notifyError.code,
+              status: notifyError.status
+            };
+            console.error("notification error:", notificationResult);
           }
 
           results.push({
             toolCallId,
-            result: `Order saved successfully. Order number: ${orderNumber}. Items: ${formatItemsSingleLine(validatedItems)}. Total: ${formatMoney(total)}`
+            result: `Order saved successfully. Order number: ${orderNumber}. Items: ${formatItemsSingleLine(validatedItems)}. Total: ${formatMoney(total)}. Notification sent: ${notificationResult.sent ? "yes" : "no"}`
           });
         } catch (error) {
           console.error("create_order error:", error);
