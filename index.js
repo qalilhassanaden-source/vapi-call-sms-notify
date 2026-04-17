@@ -333,6 +333,16 @@ async function executeLiveTransfer(body, department) {
 }
 
 function getConfigStatus() {
+  const twilioWarnings = [];
+
+  if (TWILIO_ACCOUNT_SID && !/^AC[a-f0-9]{32}$/i.test(TWILIO_ACCOUNT_SID)) {
+    twilioWarnings.push("TWILIO_ACCOUNT_SID format looks invalid.");
+  }
+
+  if (TWILIO_AUTH_TOKEN && !/^[a-f0-9]{32}$/i.test(TWILIO_AUTH_TOKEN)) {
+    twilioWarnings.push("TWILIO_AUTH_TOKEN should be exactly 32 hex characters.");
+  }
+
   return {
     supabase: {
       configured: hasSupabase,
@@ -351,7 +361,8 @@ function getConfigStatus() {
         NOTIFY_CHANNEL !== "whatsapp" && !TWILIO_FROM_NUMBER
           ? "TWILIO_FROM_NUMBER"
           : null
-      ].filter(Boolean)
+      ].filter(Boolean),
+      warnings: twilioWarnings
     },
     transfer: {
       configured: isLikelyE164(HUMAN_TRANSFER_NUMBER),
