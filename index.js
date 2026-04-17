@@ -145,6 +145,12 @@ function formatMoney(value) {
   return Number.isFinite(number) ? number.toFixed(2) : "0.00";
 }
 
+function truncateText(value, maxLength) {
+  const text = String(value || "").trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 3)}...`;
+}
+
 function extractCallerNumber(body) {
   return normalizePhone(
     body?.message?.call?.customer?.number ||
@@ -298,6 +304,26 @@ async function sendOrderNotification(body) {
   return { sent: true, sid: message.sid, status: message.status };
 }
 
+async function sendCallSummaryNotification({ callerNumber, customerName, summary, transcript }) {
+  const summaryText =
+    truncateText(summary, 1200) ||
+    truncateText(transcript, 1200) ||
+    "No summary or transcript was provided by Vapi.";
+
+  const transcriptText = transcript
+    ? `\n\nTranscript preview:\n${truncateText(transcript, 1800)}`
+    : "";
+
+  const notification =
+    `CALL SUMMARY\n\n` +
+    `Customer: ${customerName || "Unknown"}\n` +
+    `Phone: ${callerNumber || "Unknown"}\n\n` +
+    `Summary:\n${summaryText}` +
+    transcriptText;
+
+  return sendOrderNotification(notification);
+}
+
 async function executeLiveTransfer(body, department) {
   const controlUrl = getControlUrl(body);
 
@@ -408,12 +434,12 @@ app.post("/vapi", async (req, res) => {
 
     if (msgType === "status-update" || msgType === "end-of-call-report") {
       try {
-        if (supabase) {
-          const callerNumber = extractCallerNumber(req.body);
-          const customerName = extractCustomerName(req.body);
-          const summary = extractSummary(req.body);
-          const transcript = extractTranscript(req.body);
+        const callerNumber = extractCallerNumber(req.body);
+        const customerName = extractCustomerName(req.body);
+        const summary = extractSummary(req.body);
+        const transcript = extractTranscript(req.body);
 
+        if (supabase) {
           const { error } = await supabase.from("calls").insert([
             {
               caller_number: callerNumber,
@@ -430,6 +456,23 @@ app.post("/vapi", async (req, res) => {
           }
         } else {
           console.warn("Call log skipped: Supabase is not configured.");
+        }
+
+        if (msgType === "end-of-call-report") {
+          try {
+            await sendCallSummaryNotification({
+              callerNumber,
+              customerName,
+              summary,
+              transcript
+            });
+          } catch (notifyError) {
+            console.error("call summary notification error:", {
+              reason: notifyError.message || String(notifyError),
+              code: notifyError.code,
+              status: notifyError.status
+            });
+          }
         }
       } catch (err) {
         console.error("calls logging error:", err);
