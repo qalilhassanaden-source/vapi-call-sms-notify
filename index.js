@@ -1,6 +1,10 @@
+const fs = require("fs");
+const path = require("path");
 const express = require("express");
 const twilio = require("twilio");
 const { createClient } = require("@supabase/supabase-js");
+
+loadLocalEnv();
 
 const app = express();
 app.use(express.json({ limit: "5mb" }));
@@ -11,26 +15,68 @@ const SUPABASE_KEY =
 
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
-const NOTIFY_TO_NUMBER = process.env.NOTIFY_TO_NUMBER;
-const HUMAN_TRANSFER_NUMBER = process.env.HUMAN_TRANSFER_NUMBER || "";
+const TWILIO_WHATSAPP_FROM =
+  process.env.TWILIO_WHATSAPP_FROM || "whatsapp:+14155238886";
+const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER || "";
+const NOTIFY_TO_NUMBER = process.env.NOTIFY_TO_NUMBER || "";
+const NOTIFY_CHANNEL = String(process.env.NOTIFY_CHANNEL || "whatsapp")
+  .trim()
+  .toLowerCase();
+const HUMAN_TRANSFER_NUMBER = normalizePhone(
+  process.env.HUMAN_TRANSFER_NUMBER || ""
+);
 
-if (!SUPABASE_URL || !SUPABASE_KEY) {
-  throw new Error("Missing SUPABASE_URL or SUPABASE key");
-}
-
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+const hasSupabase = Boolean(SUPABASE_URL && SUPABASE_KEY);
+const supabase = hasSupabase ? createClient(SUPABASE_URL, SUPABASE_KEY) : null;
 
 const hasTwilio =
   Boolean(TWILIO_ACCOUNT_SID) &&
   Boolean(TWILIO_AUTH_TOKEN) &&
-  Boolean(NOTIFY_TO_NUMBER);
+  Boolean(NOTIFY_TO_NUMBER) &&
+  (NOTIFY_CHANNEL === "whatsapp" || Boolean(TWILIO_FROM_NUMBER));
 
 const twilioClient = hasTwilio
   ? twilio(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
   : null;
 
+function loadLocalEnv() {
+  const envPath = path.join(__dirname, ".env");
+  if (!fs.existsSync(envPath)) return;
+
+  const content = fs.readFileSync(envPath, "utf8");
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    const separatorIndex = trimmed.indexOf("=");
+    if (separatorIndex === -1) continue;
+
+    const key = trimmed.slice(0, separatorIndex).trim();
+    let value = trimmed.slice(separatorIndex + 1).trim();
+
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+
+    if (key && process.env[key] === undefined) {
+      process.env[key] = value;
+    }
+  }
+}
+
 function normalizeName(value) {
-  return String(value || "").trim().toLowerCase();
+  return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function normalizePhone(value) {
+  return String(value || "").trim().replace(/[^\d+]/g, "");
+}
+
+function isLikelyE164(value) {
+  return /^\+[1-9]\d{6,14}$/.test(normalizePhone(value));
 }
 
 function makeOrderNumber() {
@@ -39,21 +85,45 @@ function makeOrderNumber() {
 
 function getToolCallsFromBody(body) {
   const message = body?.message || {};
-  return message.toolCallList || message.toolCalls || [];
+  if (Array.isArray(message.toolCallList)) return message.toolCallList;
+  if (Array.isArray(message.toolCalls)) return message.toolCalls;
+  if (message.toolCall) return [message.toolCall];
+  return [];
+}
+
+function getToolCallId(toolCall) {
+  return toolCall?.id || toolCall?.toolCallId || toolCall?.callId || "";
 }
 
 function getToolName(toolCall) {
-  return toolCall?.name || toolCall?.function?.name || "";
+  return (
+    toolCall?.name ||
+    toolCall?.function?.name ||
+    toolCall?.tool?.function?.name ||
+    toolCall?.tool?.name ||
+    ""
+  );
+}
+
+function parseMaybeJson(value) {
+  if (value && typeof value === "object") return value;
+  if (typeof value !== "string") return {};
+
+  try {
+    return JSON.parse(value);
+  } catch {
+    return {};
+  }
 }
 
 function getToolParams(toolCall) {
-  if (toolCall?.parameters) return toolCall.parameters;
+  if (toolCall?.parameters) return parseMaybeJson(toolCall.parameters);
+  if (toolCall?.arguments) return parseMaybeJson(toolCall.arguments);
   if (toolCall?.function?.arguments) {
-    try {
-      return JSON.parse(toolCall.function.arguments);
-    } catch {
-      return {};
-    }
+    return parseMaybeJson(toolCall.function.arguments);
+  }
+  if (toolCall?.tool?.function?.arguments) {
+    return parseMaybeJson(toolCall.tool.function.arguments);
   }
   return {};
 }
@@ -65,13 +135,18 @@ function formatItemsSingleLine(items) {
     .join(", ");
 }
 
+function formatMoney(value) {
+  const number = Number(value || 0);
+  return Number.isFinite(number) ? number.toFixed(2) : "0.00";
+}
+
 function extractCallerNumber(body) {
-  return (
+  return normalizePhone(
     body?.message?.call?.customer?.number ||
-    body?.message?.call?.phoneNumber ||
-    body?.message?.customer?.number ||
-    body?.message?.customer?.phoneNumber ||
-    ""
+      body?.message?.call?.phoneNumber ||
+      body?.message?.customer?.number ||
+      body?.message?.customer?.phoneNumber ||
+      ""
   );
 }
 
@@ -109,7 +184,27 @@ function extractTranscript(body) {
   );
 }
 
+function getControlUrl(body) {
+  const call = body?.message?.call || {};
+  return (
+    call?.monitor?.controlUrl ||
+    call?.controlUrl ||
+    body?.message?.monitor?.controlUrl ||
+    ""
+  );
+}
+
+function ensureSupabase() {
+  if (!supabase) {
+    throw new Error(
+      "Supabase is not configured. Add SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY."
+    );
+  }
+}
+
 async function getAvailableMenu() {
+  ensureSupabase();
+
   const { data, error } = await supabase
     .from("menu")
     .select("id, name, price, category, available, description")
@@ -121,71 +216,188 @@ async function getAvailableMenu() {
   return data || [];
 }
 
-async function getSingleMenuItem(itemName) {
-  const { data, error } = await supabase
-    .from("menu")
-    .select("id, name, price, category, available, description")
-    .ilike("name", itemName)
-    .limit(1);
+function findMenuItemByName(menuItems, itemName) {
+  const requestedName = normalizeName(itemName);
+  if (!requestedName) return null;
 
-  if (error) throw error;
-  return data?.[0] || null;
+  const exact = menuItems.find(
+    (item) => normalizeName(item.name) === requestedName
+  );
+  if (exact) return exact;
+
+  const partialMatches = menuItems.filter((item) =>
+    normalizeName(item.name).includes(requestedName)
+  );
+
+  return partialMatches.length === 1 ? partialMatches[0] : null;
+}
+
+async function getSingleMenuItem(itemName) {
+  const menuItems = await getAvailableMenu();
+  return findMenuItemByName(menuItems, itemName);
 }
 
 async function getMenuItemsByNames(names) {
-  if (!Array.isArray(names) || names.length === 0) return [];
+  if (!Array.isArray(names) || names.length === 0) return new Map();
 
-  const cleanedNames = names
-    .map((name) => String(name || "").trim())
-    .filter(Boolean);
+  const menuItems = await getAvailableMenu();
+  const menuMap = new Map();
 
-  if (cleanedNames.length === 0) return [];
+  for (const name of names) {
+    const found = findMenuItemByName(menuItems, name);
+    if (found) menuMap.set(normalizeName(name), found);
+  }
 
-  const { data, error } = await supabase
-    .from("menu")
-    .select("id, name, price, category, available, description")
-    .in("name", cleanedNames);
-
-  if (error) throw error;
-  return data || [];
+  return menuMap;
 }
 
-async function sendWhatsAppNotification(body) {
-  if (!twilioClient) return;
+function getNotificationAddress() {
+  if (NOTIFY_CHANNEL === "whatsapp") {
+    return NOTIFY_TO_NUMBER.startsWith("whatsapp:")
+      ? NOTIFY_TO_NUMBER
+      : `whatsapp:${NOTIFY_TO_NUMBER}`;
+  }
+
+  return NOTIFY_TO_NUMBER;
+}
+
+async function sendOrderNotification(body) {
+  if (!twilioClient) {
+    console.warn("Twilio notification skipped: missing Twilio configuration.");
+    return;
+  }
+
+  const from =
+    NOTIFY_CHANNEL === "whatsapp" ? TWILIO_WHATSAPP_FROM : TWILIO_FROM_NUMBER;
 
   await twilioClient.messages.create({
-    from: "whatsapp:+14155238886",
-    to: `whatsapp:${NOTIFY_TO_NUMBER}`,
+    from,
+    to: getNotificationAddress(),
     body
   });
 }
 
+async function executeLiveTransfer(body, department) {
+  const controlUrl = getControlUrl(body);
+
+  if (!controlUrl) {
+    return false;
+  }
+
+  const url = controlUrl.endsWith("/control")
+    ? controlUrl
+    : `${controlUrl.replace(/\/$/, "")}/control`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      type: "transfer",
+      destination: {
+        type: "number",
+        number: HUMAN_TRANSFER_NUMBER
+      },
+      content: department
+        ? `Transferring you to ${department} now.`
+        : "Transferring you now."
+    })
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Vapi transfer failed: ${response.status} ${text}`);
+  }
+
+  return true;
+}
+
+function getConfigStatus() {
+  return {
+    supabase: {
+      configured: hasSupabase,
+      missing: [
+        !SUPABASE_URL ? "SUPABASE_URL" : null,
+        !SUPABASE_KEY ? "SUPABASE_SERVICE_ROLE_KEY" : null
+      ].filter(Boolean)
+    },
+    twilio: {
+      configured: hasTwilio,
+      channel: NOTIFY_CHANNEL,
+      missing: [
+        !TWILIO_ACCOUNT_SID ? "TWILIO_ACCOUNT_SID" : null,
+        !TWILIO_AUTH_TOKEN ? "TWILIO_AUTH_TOKEN" : null,
+        !NOTIFY_TO_NUMBER ? "NOTIFY_TO_NUMBER" : null,
+        NOTIFY_CHANNEL !== "whatsapp" && !TWILIO_FROM_NUMBER
+          ? "TWILIO_FROM_NUMBER"
+          : null
+      ].filter(Boolean)
+    },
+    transfer: {
+      configured: isLikelyE164(HUMAN_TRANSFER_NUMBER),
+      missing: !HUMAN_TRANSFER_NUMBER ? ["HUMAN_TRANSFER_NUMBER"] : [],
+      warning:
+        HUMAN_TRANSFER_NUMBER && !isLikelyE164(HUMAN_TRANSFER_NUMBER)
+          ? "HUMAN_TRANSFER_NUMBER should be E.164 format, like +15551234567."
+          : ""
+    }
+  };
+}
+
 app.post("/vapi", async (req, res) => {
   try {
-    console.log("VAPI BODY:", JSON.stringify(req.body, null, 2));
+    console.log("VAPI MESSAGE TYPE:", req.body?.message?.type || "unknown");
 
     const message = req.body?.message || {};
     const msgType = message?.type || "";
 
+    if (msgType === "transfer-destination-request") {
+      if (!isLikelyE164(HUMAN_TRANSFER_NUMBER)) {
+        console.error("Transfer requested, but HUMAN_TRANSFER_NUMBER is missing or invalid.");
+        return res.status(200).json({
+          message: {
+            type: "request-start",
+            message:
+              "I am sorry, the transfer line is not configured right now."
+          }
+        });
+      }
+
+      return res.status(200).json({
+        destination: {
+          type: "number",
+          number: HUMAN_TRANSFER_NUMBER
+        },
+        message: {
+          type: "request-start",
+          message: "Transferring you now."
+        }
+      });
+    }
+
     if (msgType === "status-update" || msgType === "end-of-call-report") {
       try {
-        const callerNumber = extractCallerNumber(req.body);
-        const customerName = extractCustomerName(req.body);
-        const summary = extractSummary(req.body);
-        const transcript = extractTranscript(req.body);
+        if (supabase) {
+          const callerNumber = extractCallerNumber(req.body);
+          const customerName = extractCustomerName(req.body);
+          const summary = extractSummary(req.body);
+          const transcript = extractTranscript(req.body);
 
-        const { error } = await supabase.from("calls").insert([
-          {
-            caller_number: callerNumber,
-            customer_name: customerName,
-            summary,
-            transcript,
-            status: msgType === "status-update" ? "status-update" : "completed"
+          const { error } = await supabase.from("calls").insert([
+            {
+              caller_number: callerNumber,
+              customer_name: customerName,
+              summary,
+              transcript,
+              status:
+                msgType === "status-update" ? "status-update" : "completed"
+            }
+          ]);
+
+          if (error) {
+            console.error("calls insert error:", error);
           }
-        ]);
-
-        if (error) {
-          console.error("calls insert error:", error);
+        } else {
+          console.warn("Call log skipped: Supabase is not configured.");
         }
       } catch (err) {
         console.error("calls logging error:", err);
@@ -203,7 +415,7 @@ app.post("/vapi", async (req, res) => {
     const results = [];
 
     for (const toolCall of toolCalls) {
-      const toolCallId = toolCall.id;
+      const toolCallId = getToolCallId(toolCall);
       const name = getToolName(toolCall);
       const params = getToolParams(toolCall);
 
@@ -222,7 +434,7 @@ app.post("/vapi", async (req, res) => {
           }
 
           const menuText = data
-            .map((item) => `${item.name} - ${item.price}`)
+            .map((item) => `${item.name} - ${formatMoney(item.price)}`)
             .join(", ");
 
           results.push({
@@ -233,7 +445,8 @@ app.post("/vapi", async (req, res) => {
           console.error("get_menu error:", error);
           results.push({
             toolCallId,
-            result: "Menu is temporarily unavailable right now."
+            result:
+              "Menu is temporarily unavailable. Please ask the caller to try again soon."
           });
         }
         continue;
@@ -241,7 +454,9 @@ app.post("/vapi", async (req, res) => {
 
       if (name === "get_menu_item") {
         try {
-          const itemName = String(params.item_name || "").trim();
+          const itemName = String(
+            params.item_name || params.itemName || params.name || ""
+          ).trim();
 
           if (!itemName) {
             results.push({
@@ -267,7 +482,7 @@ app.post("/vapi", async (req, res) => {
 
           results.push({
             toolCallId,
-            result: `${item.name} costs ${item.price}.${descriptionText}`
+            result: `${item.name} costs ${formatMoney(item.price)}.${descriptionText}`
           });
         } catch (error) {
           console.error("get_menu_item error:", error);
@@ -286,35 +501,34 @@ app.post("/vapi", async (req, res) => {
           if (requestedItems.length === 0) {
             results.push({
               toolCallId,
-              result: "No items were provided in the order."
+              result:
+                "No items were provided in the order. Ask the caller which menu items and quantities they want."
             });
             continue;
           }
 
           const requestedNames = requestedItems
-            .map((item) => item.name)
+            .map((item) => item.name || item.item_name || item.itemName)
             .filter(Boolean);
 
-          const menuItems = await getMenuItemsByNames(requestedNames);
-          const menuMap = new Map(
-            menuItems.map((item) => [normalizeName(item.name), item])
-          );
+          const menuMap = await getMenuItemsByNames(requestedNames);
 
           const validatedItems = [];
           const invalidItems = [];
 
           for (const item of requestedItems) {
-            const found = menuMap.get(normalizeName(item.name));
+            const rawName = item.name || item.item_name || item.itemName;
+            const found = menuMap.get(normalizeName(rawName));
 
             if (!found || !found.available) {
-              invalidItems.push(item.name || "Unknown item");
+              invalidItems.push(rawName || "Unknown item");
               continue;
             }
 
-            const quantity = Number(item.quantity || 0);
+            const quantity = Number(item.quantity || item.qty || 0);
 
-            if (!Number.isFinite(quantity) || quantity <= 0) {
-              invalidItems.push(item.name || "Unknown item");
+            if (!Number.isInteger(quantity) || quantity <= 0) {
+              invalidItems.push(`${rawName || "Unknown item"} quantity`);
               continue;
             }
 
@@ -329,7 +543,7 @@ app.post("/vapi", async (req, res) => {
           if (invalidItems.length > 0) {
             results.push({
               toolCallId,
-              result: `These items are not available or invalid: ${invalidItems.join(", ")}`
+              result: `These items are not available or invalid: ${invalidItems.join(", ")}. Confirm the item names from the current menu before saving the order.`
             });
             continue;
           }
@@ -338,22 +552,34 @@ app.post("/vapi", async (req, res) => {
             return sum + item.quantity * item.unit_price;
           }, 0);
 
-          const deliveryFee = Number(params.delivery_fee || 0);
-          const total = subtotal + deliveryFee;
+          const deliveryFee = Number(params.delivery_fee || params.deliveryFee || 0);
+          const safeDeliveryFee = Number.isFinite(deliveryFee) ? deliveryFee : 0;
+          const total = subtotal + safeDeliveryFee;
           const orderNumber = makeOrderNumber();
 
           const callerNumber =
-            String(params.caller_number || "").trim() || extractCallerNumber(req.body);
+            normalizePhone(params.caller_number || params.callerNumber || "") ||
+            extractCallerNumber(req.body);
 
-          const customerName =
-            String(params.customer_name || "").trim() || extractCustomerName(req.body);
+          const customerName = String(
+            params.customer_name || params.customerName || extractCustomerName(req.body)
+          ).trim();
 
           const customerPhone =
-            String(params.customer_phone || "").trim() || callerNumber;
+            normalizePhone(
+              params.customer_phone ||
+                params.customerPhone ||
+                params.phone ||
+                ""
+            ) || callerNumber;
 
-          const orderType = String(params.order_type || "pickup").trim();
+          const orderType = String(
+            params.order_type || params.orderType || "pickup"
+          ).trim();
           const address = String(params.address || "").trim();
-          const notes = String(params.notes || "").trim();
+          const notes = String(params.notes || params.note || "").trim();
+
+          ensureSupabase();
 
           const { error } = await supabase.from("orders").insert([
             {
@@ -366,7 +592,7 @@ app.post("/vapi", async (req, res) => {
               address,
               notes,
               subtotal,
-              delivery_fee: deliveryFee,
+              delivery_fee: safeDeliveryFee,
               total,
               status: "new"
             }
@@ -376,50 +602,75 @@ app.post("/vapi", async (req, res) => {
             console.error("create_order insert error:", error);
             results.push({
               toolCallId,
-              result: "Failed to save order. Please try again."
+              result:
+                "Failed to save the order because the order database rejected it. Please confirm all required order fields are configured."
             });
             continue;
           }
 
           const notification =
-            `🍔 NEW ORDER ${orderNumber}\n\n` +
+            `NEW ORDER ${orderNumber}\n\n` +
             `Customer: ${customerName || "Unknown"}\n` +
             `Phone: ${customerPhone || "Unknown"}\n` +
             `Type: ${orderType}\n` +
             `Items: ${formatItemsSingleLine(validatedItems)}\n` +
             `Address: ${address || "-"}\n` +
             `Notes: ${notes || "-"}\n` +
-            `Subtotal: ${subtotal}\n` +
-            `Delivery Fee: ${deliveryFee}\n` +
-            `Total: ${total}`;
+            `Subtotal: ${formatMoney(subtotal)}\n` +
+            `Delivery Fee: ${formatMoney(safeDeliveryFee)}\n` +
+            `Total: ${formatMoney(total)}`;
 
           try {
-            await sendWhatsAppNotification(notification);
+            await sendOrderNotification(notification);
           } catch (notifyError) {
-            console.error("WhatsApp notification error:", notifyError);
+            console.error("notification error:", notifyError);
           }
 
           results.push({
             toolCallId,
-            result: `Order saved successfully. Order number: ${orderNumber}. Items: ${formatItemsSingleLine(validatedItems)}. Total: ${total}`
+            result: `Order saved successfully. Order number: ${orderNumber}. Items: ${formatItemsSingleLine(validatedItems)}. Total: ${formatMoney(total)}`
           });
         } catch (error) {
           console.error("create_order error:", error);
           results.push({
             toolCallId,
-            result: "There was a problem saving the order."
+            result:
+              "There was a problem saving the order. Please ask the caller to repeat the order or transfer them to a person."
           });
         }
         continue;
       }
 
-      if (name === "transfer_call") {
-        results.push({
-          toolCallId,
-          result: HUMAN_TRANSFER_NUMBER
-            ? `Transfer approved. Connect the caller to ${HUMAN_TRANSFER_NUMBER}.`
-            : "No human transfer number is configured."
-        });
+      if (name === "transfer_call" || name === "transferCall") {
+        if (!isLikelyE164(HUMAN_TRANSFER_NUMBER)) {
+          results.push({
+            toolCallId,
+            result:
+              "No valid human transfer number is configured. HUMAN_TRANSFER_NUMBER must look like +15551234567."
+          });
+          continue;
+        }
+
+        try {
+          const transferred = await executeLiveTransfer(
+            req.body,
+            params.department || params.reason || ""
+          );
+
+          results.push({
+            toolCallId,
+            result: transferred
+              ? "Transfer started successfully."
+              : `Transfer approved. Use ${HUMAN_TRANSFER_NUMBER} as the transfer destination.`
+          });
+        } catch (error) {
+          console.error("transfer_call error:", error);
+          results.push({
+            toolCallId,
+            result:
+              "Transfer failed on the phone system. Apologize to the caller and offer to take a message."
+          });
+        }
         continue;
       }
 
@@ -432,21 +683,27 @@ app.post("/vapi", async (req, res) => {
     return res.status(200).json({ results });
   } catch (err) {
     console.error("VAPI ROUTE ERROR:", err);
-    return res.status(200).json({ results: [] });
+    return res.status(200).json({
+      results: [],
+      error: "Webhook handler failed before a tool response could be built."
+    });
   }
 });
 
 app.get("/test-menu", async (_, res) => {
   try {
-    const { data, error } = await supabase
-      .from("menu")
-      .select("*")
-      .eq("available", true);
-
-    return res.status(200).json({ data, error });
+    const data = await getAvailableMenu();
+    return res.status(200).json({ data, error: null });
   } catch (err) {
-    return res.status(500).json({ error: String(err) });
+    return res.status(500).json({ data: null, error: String(err.message || err) });
   }
+});
+
+app.get("/health", (_, res) => {
+  res.status(200).json({
+    ok: true,
+    config: getConfigStatus()
+  });
 });
 
 app.get("/", (_, res) => res.send("ok"));
@@ -454,4 +711,5 @@ app.get("/", (_, res) => res.send("ok"));
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Listening on ${port}`);
+  console.log("Config status:", JSON.stringify(getConfigStatus(), null, 2));
 });
